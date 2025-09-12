@@ -8,13 +8,13 @@ from .config import C_PUCT, DIRICHLET_ALPHA, DIRICHLET_EPS, NUM_ACTIONS
 class Node:
 	__slots__ = ("P","N","W","Q","children","is_expanded","legal")
 	def __init__(self):
-		self.P = None  # prior policy logits/probs for legal actions
+		self.P = np.zeros(NUM_ACTIONS, dtype=np.float32)  # prior policy logits/probs for legal actions
 		self.N = np.zeros(NUM_ACTIONS, dtype=np.int32)
 		self.W = np.zeros(NUM_ACTIONS, dtype=np.float32)
 		self.Q = np.zeros(NUM_ACTIONS, dtype=np.float32)
 		self.children: Dict[int, Node] = {}
 		self.is_expanded = False
-		self.legal = None
+		self.legal = np.zeros(NUM_ACTIONS, dtype=bool)
 
 class MCTS:
 	def __init__(self, net, device="cuda", add_root_noise=True):
@@ -38,6 +38,8 @@ class MCTS:
 		st = state.clone()
 		# selection
 		while cur.is_expanded:
+			if not cur.legal.any():
+				break	# no legal actions -> terminal; *which avoids random selection when no legal actions!
 			a = self._select_action(cur)
 			path.append((cur, a))
 			if a not in cur.children:
@@ -56,7 +58,6 @@ class MCTS:
 
 	def _select_action(self, node: Node) -> int:
 		# PUCT: a = argmax Q + U
-		assert node.P is not None and node.legal is not None, "Node must be expanded before selecting action"
 		legal = node.legal
 		N_total = node.N.sum() + 1
 		# U = c_puct * P * sqrt(N_total)/(1+N[a])

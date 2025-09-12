@@ -7,7 +7,6 @@ from .utils import rc_to_i, i_to_rc, in_bounds, empty_mask, cell_full, cell_has_
 
 # piece types
 SQUARE, CIRCLE, ARROW = 0, 1, 2
-__all__ = ["GameState", "Move", "SQUARE", "CIRCLE", "ARROW"]
 
 @dataclass
 class Move:
