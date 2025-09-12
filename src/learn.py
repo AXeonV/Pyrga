@@ -23,13 +23,13 @@ def train_once(net: PolicyValueNet, S: np.ndarray, P: np.ndarray, Z: np.ndarray,
 	net = net.to(device)
 	net.train()
 	opt = optim.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
-	scaler = torch.cuda.amp.GradScaler(enabled=True if device.startswith('cuda') else False)
+	scaler = torch.cuda.amp.GradScaler(device_type='cuda', enabled=device.startswith('cuda'))
 	ce = nn.CrossEntropyLoss()
 	mse = nn.MSELoss()
 	for _ in range(epochs):
 		for s, p, z in dl:
 			s = s.to(device); p = p.to(device); z = z.to(device)
-			with torch.cuda.amp.autocast(enabled=True if device.startswith('cuda') else False):
+			with torch.cuda.amp.autocast(device_type='cuda', enabled=device.startswith('cuda')):
 				logits, v = net(s)
 				log_probs = torch.log_softmax(logits, dim=-1)
 				policy_loss = -(p * log_probs).sum(dim=-1).mean()

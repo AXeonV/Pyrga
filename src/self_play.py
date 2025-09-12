@@ -9,7 +9,7 @@ from .mcts import MCTS
 from .config import MCTS_SIMS, TEMPERATURE
 
 
-def play_game(net, device="cpu", mcts_sims=MCTS_SIMS):
+def play_game(net, device="cuda", mcts_sims=MCTS_SIMS):
 	mcts = MCTS(net, device=device, add_root_noise=True)
 	states = []
 	policies = []

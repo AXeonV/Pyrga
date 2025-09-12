@@ -17,7 +17,7 @@ class Node:
 		self.legal = None
 
 class MCTS:
-	def __init__(self, net, device="cpu", add_root_noise=True):
+	def __init__(self, net, device="cuda", add_root_noise=True):
 		self.net = net
 		self.device = device
 		self.add_root_noise = add_root_noise

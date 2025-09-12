@@ -34,7 +34,7 @@ def main():
 
 	net = PolicyValueNet().to(args.device)
 	opt = optim.AdamW(net.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-	scaler = torch.cuda.amp.GradScaler(enabled=True if args.device.startswith('cuda') else False)
+	scaler = torch.cuda.amp.GradScaler(device_type='cuda', enabled=args.device.startswith('cuda'))
 
 	ce = nn.CrossEntropyLoss()
 	mse = nn.MSELoss()
@@ -49,7 +49,7 @@ def main():
 			s = s.to(args.device)
 			p = p.to(args.device)
 			z = z.to(args.device)
-			with torch.cuda.amp.autocast(enabled=True if args.device.startswith('cuda') else False):
+			with torch.cuda.amp.autocast(device_type='cuda', enabled=args.device.startswith('cuda')):
 				logits, v = net(s)
 				# policy loss: cross-entropy with target probabilities -> use soft targets via KL (or CE on probs)
 				log_probs = torch.log_softmax(logits, dim=-1)
