@@ -1,69 +1,107 @@
 # Pyrga
 
-## 4x4 Stacking Placement Game — AlphaZero/KataGo Style (PyTorch)
+Lightweight AlphaZero-style pipeline for a custom 4×4 stacking / tower control game: self-play generation, PUCT MCTS (with Dirichlet noise), policy–value network, supervised updates, iterative gating.
 
-This repository implements a compact AlphaZero/KataGo-style pipeline for a custom 4×4 stacking placement game. It focuses on the essential ingredients: a policy–value network, PUCT Monte Carlo Tree Search (MCTS) with root Dirichlet noise, self-play data generation, and a simple training loop.
+## Rules
 
-## Game definition
+- Board: 4×4 (16 cells).
+- Pieces per player: 5 squares, 5 circles, 5 arrows (arrow direction chosen on placement: up/right/down/left).
+- Placement constraints (depend on previous move):
+  - Previous was a square at (r,c): next move must go to one of its 4 orthogonal neighbours.
+  - Previous was an arrow at (r,c) with direction d: next move must lie anywhere along the ray from (r,c) in direction d (inclusive) until the edge.
+  - Previous was a circle at (r,c): next move must (if still legal) be on the same cell.
+  - Fallback: if no legal cell under these constraints, you may place on any empty cell (with zero pieces). If none exist the game ends.
+- Cell constraints: each cell holds at most 3 pieces; piece types are unique within a cell (≤1 square, ≤1 circle, ≤1 arrow).
+- Tower & scoring: when a cell reaches 3 pieces it becomes a tower. Ownership: player with strictly more pieces there (2–1 or 3–0). Final score = number of owned towers. Outcome z ∈ {+1, 0, -1} from the current player’s perspective.
+- Action encoding (96 total):
+  - 0–15: place square on cell i
+  - 16–31: place circle on cell i
+  - 32–95: place arrow on cell i; direction = (a−32) % 4 (0 up, 1 right, 2 down, 3 left)
 
-- Board: 4×4 grid.
-- Pieces (per player): 5 squares, 5 circles, 5 arrows. Arrow is a single piece type whose direction (up/right/down/left) is chosen at placement.
-- Previous-move constraints:
-  - If the previous move placed a square at (r,c), the next move must be placed in one of its 4 orthogonal neighbors (subject to legality).
-  - If the previous move placed an arrow at (r,c) pointing direction d, the next move must be placed on any cell along the ray from (r,c) in direction d, up to the board edge (subject to legality).
-  - If the previous move placed a circle at (r,c), the next move must be placed on the same cell (subject to legality).
-  - Fallback: if no legal move exists under these constraints, the player may place on any completely empty cell. If no empty cells remain, the game ends.
-- Cell capacity and uniqueness: each cell holds at most 3 pieces total, and piece types within a cell must be unique (at most one square, one circle, one arrow).
-- Tower and scoring: a cell with 3 pieces becomes a “tower”. The tower is owned by the side who placed strictly more pieces in that cell (2–1 or 3–0). Final score is the number of owned towers.
+## Engine
 
-## Action encoding (96 actions)
+Core learning triple: (s, π, z).
 
-- 0..15: place a square on cell i (i ∈ [0,15])
-- 16..31: place a circle on cell i
-- 32..95: place an arrow on cell i with direction d = (a−32) % 4; 0: up, 1: right, 2: down, 3: left
+1. Observation: stacked planes (own/opponent occupancy per type, arrow direction one-hot, remaining piece counts, side-to-move).
+2. Network (PolicyValueNet): light residual CNN → 96 policy logits + scalar value v ∈ [−1,1].
+3. MCTS: PUCT selection Q+U; root Dirichlet noise for exploration; illegal actions masked then renormalised; value signs flipped up the path.
+4. Self-Play: run N simulations per move, convert visit counts to π; use temperature sampling for early moves then argmax; game end produces z.
+5. Training (train.py / learn.py): minimise L = CE(policy_logits, π_target) + MSE(v, z); AdamW + optional AMP; iterative mode adds replay buffer + arena gating (accept if new model win rate ≥ threshold).
+6. Stability: strict legality masking, temperature cooling, replay buffer balancing distribution shift.
 
-Legal moves are strictly masked by the previous-move constraints, cell capacity/type uniqueness, and remaining pieces. If no legal actions exist, the fallback to “any empty cell” is applied.
+Technical notes:
+- PUCT: U ∝ P[a] * sqrt(N_total) / (1 + N[a]) balancing exploration–exploitation.
+- Dirichlet: root prior perturbation avoids early policy collapse.
+- Value sign flip: zero-sum perspective alignment.
+- AMP: reduces memory + latency; falls back cleanly on CPU or when disabled.
 
-## AlphaZero/KataGo mapping in this codebase
+## Files
 
-- Policy–value network (ResNet): `src/model.py`
-  - A lightweight residual CNN consumes stacked planes (piece presence, arrow direction one-hot, remaining counts, side-to-move) and outputs policy logits over the 96 actions and a scalar value in [−1,1].
+```
+src/
+  game.py        # Rules & state transitions
+  mcts.py        # PUCT search
+  model.py       # Policy-value network
+  self_play.py   # Self-play generation (s, π, z)
+  train.py       # Supervised training on NPZ data
+  learn.py       # Iterative loop: self-play → train → arena → gating
+  config.py      # Constants / default hyperparams
+tests/           # Rule & smoke tests
+data/            # Generated data & snapshots
+ckpt/            # Model weights
+```
 
-- PUCT MCTS with root Dirichlet noise: `src/mcts.py`
-  - Selection: argmax over Q + U, where U = c_puct × P[a] × sqrt(∑N) / (1 + N[a]).
-  - Expansion: network provides policy priors P (masked to legal moves and normalized) and the leaf value v.
-  - Root exploration: inject Dirichlet noise at the root (α and ε configurable) to improve early-game diversity.
-  - Backup: alternate signs of v up the path and update W/N/Q per edge.
+### Quick
+Generate self-play data:
+```bash
+python -m src.self_play --games 50 --mcts-sims 200 --out data/sp.npz --temperature 1.0 --temp-moves 8
+```
+Supervised training (single dataset):
+```bash
+python -m src.train --data data/sp.npz --epochs 5 --batch-size 256 --lr 1e-3 --seed 123
+```
+Iterative self-improvement:
+```bash
+python -m src.learn --iters 5 --games-per-iter 80 --mcts-sims-sp 200 \
+  --eval-games 40 --accept-rate 0.55 --temperature 1.0 --temp-moves 8
+```
+Disable AMP: add `--no-amp`. Use CPU: `--device cpu`.
 
-- Self-play data generation: `src/self_play.py`
-  - For each state, run MCTS and collect the normalized visit counts as π (soft target for the policy), sample an action (temperature can be tuned), and continue until terminal.
-  - Upon termination, compute z ∈ {−1,0,1} based on tower majority and assign it from each state’s player-to-move perspective.
+### Data Format
+NPZ file fields:
+- `s`: float32 (N, C, 4, 4)
+- `p`: float32 (N, 96)
+- `z`: float32 (N,)
 
-- Training loop: `src/train.py`
-  - Loss = policy cross-entropy on soft targets π + value MSE against z.
-  - Mixed precision (AMP) enabled on CUDA by default. Optimizer: AdamW.
-  - The trained network is the “expert” prior for subsequent self-play iterations.
+## Changelog
 
-## Architectural components
+High-impact implemented changes (relative to initial baseline):
+1. Unified AMP handling: single `autocast` + `GradScaler` pattern across `train.py` and `learn.py` with `--no-amp` switch.
+2. Added reproducibility controls: `--seed` (covers Python, NumPy, Torch, CUDA determinism best-effort).
+3. Extended CLI hyperparameters: learning rate, weight decay, clip norm, temperature scheduling (`--temperature`, `--temp-moves`), Dirichlet toggle (`--no-dirichlet`).
+4. Self-play enhancements: early-move temperature sampling; optional root Dirichlet suppression; legal mask strictness clarified.
+5. Replay buffer + gating: iterative loop (`learn.py`) with arena evaluation and accept-rate threshold.
+6. Code simplification: removed interim utility module; consolidated training logic; streamlined `train_once`.
+7. Policy/Value loss structure: explicit CE + MSE with clear logging points; ready for auxiliary heads.
+8. Dataset specification: consistent NPZ schema (`s,p,z`) documented; easy future augmentation hook.
+9. Documentation overhaul: concise English README + formalised rules, engine, file map, future roadmap.
+10. Safety & stability: gradient scaling, deterministic seeds, explicit illegal action masking, temperature decay.
 
-- `src/game.py`: complete rules, legal move generation (constraints + fallback), action encoding/decoding, terminal and scoring logic, observation planes.
-- `src/model.py`: compact residual policy–value network.
-- `src/mcts.py`: PUCT search with root Dirichlet noise.
-- `src/self_play.py`: self-play rollouts to produce (s, π, z) triplets.
-- `src/train.py`: supervised updates on π and z.
-- `src/learn.py`: iterative orchestrator (self-play → train → arena evaluate → model gating), moving the system towards a full AlphaZero loop.
-- `src/config.py`: board/action constants and default hyperparameters.
+## Future
 
-## Notes on design and efficiency
+Potential extensions (roughly ascending sophistication):
+1. 8-fold symmetry augmentation (rotations / reflections).
+2. Replay sampling strategies: stochastic or prioritized (PER).
+3. Policy regularisation: KL to previous policy or temperature ramps.
+4. Auxiliary heads: tower ownership or remaining-move prediction.
+5. Search efficiency: root reuse / batched GPU inference / partial tree persistence.
+6. Distributed self-play: multi-process or multi-node with parameter server.
+7. Advanced search tuning: dynamic c_puct, progressive widening.
+8. Evaluation suite: Elo tracking, long-horizon stability, symmetry consistency checks.
+9. Network scaling: deeper residual stacks, Squeeze-Excitation / attention, mixed-head designs.
+10. Reliability: NaN/Inf watchdog & gradient explosion fuse.
 
-- Strict legal move masking keeps the policy focused and reduces wasted search.
-- The 4×4 size enables fast experimentation; increase MCTS simulations or network width/depth for stronger play.
-- CUDA is the default device for both self-play and training; switch to CPU by passing `--device cpu` if needed.
+PRs / experiments are welcome.
 
-## Possible extensions (towards KataGo-style engineering)
-
-- Self-play/Training orchestration loop with model gating (arena evaluation).
-- Symmetry augmentation (8 board symmetries) to improve sample efficiency.
-- Progressive widening or prior-based expansion to limit branching.
-- Auxiliary heads (e.g., tower ownership prediction) for denser learning signals.
-- Replay buffer with deduplication (e.g., Zobrist hashing) and temperature scheduling.
+---
+Concise, reproducible, extensible. Have fun. 🧠

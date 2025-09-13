@@ -34,6 +34,7 @@ class GameState:
 		self.player = 0
 		self.last = LastMove(cell=None, ptype=None, dir=0)
 		self.move_count = 0
+		self.is_1st_square = False
 
 	def clone(self) -> 'GameState':
 		st = GameState()
@@ -44,6 +45,7 @@ class GameState:
 		st.player = self.player
 		st.last = LastMove(self.last.cell, self.last.ptype, self.last.dir)
 		st.move_count = self.move_count
+		st.is_1st_square = self.is_1st_square
 		return st
 
 	# action encoding: 0..15 square, 16..31 circle, 32..95 arrow (dir = (a-32)%4)
@@ -108,7 +110,9 @@ class GameState:
 			# SQUARE
 			if self.remaining[self.player, SQUARE] > 0 and cap_ok and not types_here[SQUARE]:
 				if self.last.ptype is None or cand[r, c]:
-					mask[self.encode_action(i, SQUARE)] = True; any_legal = True
+					if not (self.is_1st_square and self.player == 0 and self.move_count == 2):
+       			# if player 0's first move is square, he cannot place square on step 3
+						mask[self.encode_action(i, SQUARE)] = True; any_legal = True
 			# CIRCLE
 			if self.remaining[self.player, CIRCLE] > 0 and cap_ok and not types_here[CIRCLE]:
 				if self.last.ptype is None or cand[r, c]:
@@ -118,7 +122,12 @@ class GameState:
 				# constrain by last move cells; dir does not affect cell candidacy except it's encoded per action
 				if self.last.ptype is None or cand[r, c]:
 					base = 32 + i*4
-					mask[base:base+4] = True; any_legal = True
+					for d in range(4):
+						# also need to check arrow direction does not point to the wall
+						dr, dc = DIRS[d]
+						rr, cc = r+dr, c+dc
+						if in_bounds(rr, cc):
+							mask[base + d] = True; any_legal = True
 		# Fallback: if under constraints no legal move, allow any empty cell with any type available
 		if not any_legal:
 			# if no empty cells too -> game over (no action will be legal)
@@ -131,7 +140,12 @@ class GameState:
 					mask[self.encode_action(i, CIRCLE)] = True
 				if self.remaining[self.player, ARROW] > 0:
 					base = 32 + i*4
-					mask[base:base+4] = True
+					for d in range(4):
+						# also need to check arrow direction does not point to the wall
+						dr, dc = DIRS[d]
+						rr, cc = r+dr, c+dc
+						if in_bounds(rr, cc):
+							mask[base + d] = True
 		return mask
 
 	def apply(self, a: int):
@@ -146,6 +160,8 @@ class GameState:
 		# place
 		self.board_types[r, c, mv.ptype] = True
 		self.owner_counts[r, c, self.player] += 1
+		if mv.ptype == SQUARE and self.player == 0 and self.move_count == 0:
+			self.is_1st_square = True
 		if mv.ptype == ARROW:
 			self.arrow_dir[r, c] = mv.dir
 		self.remaining[self.player, mv.ptype] -= 1
@@ -165,7 +181,7 @@ class GameState:
 		return True
 
 	def result(self) -> int:
-		# return +1 if player 0 wins, -1 if player 1 wins, 0 draw
+		# return +1 if player 0 wins, -1 if player 1 wins
 		# count towers (cells with 3 pieces) majority by owner_counts
 		p0, p1 = 0, 0
 		for r in range(BOARD_SIZE):
@@ -177,9 +193,8 @@ class GameState:
 						p1 += 1
 		if p0 > p1:
 			return 1
-		if p1 > p0:
+		else: # p0 == p1, the second player wins ties
 			return -1
-		return 0
 
 	def obs(self) -> np.ndarray:
 		# observation planes [C,H,W]
