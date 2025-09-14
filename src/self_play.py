@@ -53,9 +53,10 @@ def main():
 	ap.add_argument("--mcts-sims", type=int, default=MCTS_SIMS)
 	ap.add_argument("--device", type=str, default="cuda")
 	ap.add_argument("--out", type=str, default="data/sp.npz")
+	ap.add_argument("--model", type=str, default=None, help="可选：已有权重文件(.pt)路径，加载后用于自博")
 	ap.add_argument("--temperature", type=float, default=TEMPERATURE, help="初期温度(>0采样)；与 --temp-moves 联合使用")
 	ap.add_argument("--temp-moves", type=int, default=8, help="前多少步使用温度采样")
-	ap.add_argument("--seed", type=int, default=None)
+	ap.add_argument("--seed", type=int, default=42)
 	ap.add_argument("--no-dirichlet", action="store_true", help="关闭根节点Dirichlet噪声")
 	args = ap.parse_args()
 
@@ -63,7 +64,14 @@ def main():
 		raise RuntimeError("CUDA device requested but not available. Please install a CUDA-enabled PyTorch build or set --device cpu.")
 
 	_set_seed(args.seed)
-	net = PolicyValueNet().to(args.device); net.eval()
+	net = PolicyValueNet().to(args.device)
+	if args.model is not None:
+		if not os.path.isfile(args.model):
+			raise FileNotFoundError(f"Model file not found: {args.model}")
+		state = torch.load(args.model, map_location=args.device)
+		net.load_state_dict(state)
+		print(f"Loaded model weights from {args.model}")
+	net.eval()
 
 	all_s, all_p, all_z = [], [], []
 	for _ in trange(args.games, desc="self-play"):

@@ -181,7 +181,6 @@ class GameState:
 		return True
 
 	def result(self) -> int:
-		# return +1 if player 0 wins, -1 if player 1 wins
 		# count towers (cells with 3 pieces) majority by owner_counts
 		p0, p1 = 0, 0
 		for r in range(BOARD_SIZE):
@@ -191,10 +190,7 @@ class GameState:
 						p0 += 1
 					elif self.owner_counts[r, c, 1] > self.owner_counts[r, c, 0]:
 						p1 += 1
-		if p0 > p1:
-			return 1
-		else: # p0 == p1, the second player wins ties
-			return -1
+		return 1 if p0 > p1 else -1
 
 	def obs(self) -> np.ndarray:
 		# observation planes [C,H,W]

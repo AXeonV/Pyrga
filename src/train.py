@@ -3,7 +3,7 @@ import argparse
 import os
 import random
 import time
-from typing import Optional
+from typing import Optional, Callable
 
 import numpy as np
 import torch
@@ -57,6 +57,8 @@ def train_model(
 	clip_norm: float,
 	amp: bool = True,
 	seed: Optional[int] = None,
+	logger: Optional[Callable[[str], None]] = None,
+	return_best: bool = True,
 ):
 	set_seed(seed)
 	dl = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
@@ -66,11 +68,12 @@ def train_model(
 
 	use_amp = amp and device.startswith("cuda") and torch.cuda.is_available()
 	if use_amp:
-		from torch.cuda.amp import GradScaler, autocast  # type: ignore
-		scaler = GradScaler()
+		from torch.amp import GradScaler, autocast  # type: ignore
+		scaler = GradScaler('cuda')
+		autocast_ctx = lambda: autocast('cuda')
 	else:
 		from contextlib import nullcontext
-		autocast = nullcontext  # type: ignore
+		autocast_ctx = nullcontext  # type: ignore
 
 		class _DummyScaler:  # minimal shim
 			def scale(self, x):
@@ -85,12 +88,12 @@ def train_model(
 		scaler = _DummyScaler()  # type: ignore
 
 	mse = nn.MSELoss()
+	best_state = None; best_loss = float('inf')
 	for ep in range(1, epochs + 1):
-		m_loss = AverageMeter(); m_p = AverageMeter(); m_v = AverageMeter()
-		t0 = time.time()
+		m_loss = AverageMeter(); m_p = AverageMeter(); m_v = AverageMeter(); t0 = time.time()
 		for s, p, z in dl:
 			s = s.to(device); p = p.to(device); z = z.to(device)
-			with autocast():
+			with autocast_ctx():
 				logits, v = net(s)
 				log_probs = torch.log_softmax(logits, dim=-1)
 				policy_loss = -(p * log_probs).sum(dim=-1).mean()
@@ -104,16 +107,25 @@ def train_model(
 			scaler.step(opt); scaler.update()
 			bs = s.size(0)
 			m_loss.update(loss.item(), bs); m_p.update(policy_loss.item(), bs); m_v.update(value_loss.item(), bs)
-		dt = time.time() - t0
-		print(f"epoch {ep}: loss={m_loss.avg:.4f} policy={m_p.avg:.4f} value={m_v.avg:.4f} time={dt:.1f}s")
+		dt = time.time()-t0
+		msg = f"epoch {ep}: loss={m_loss.avg:.4f} policy={m_p.avg:.4f} value={m_v.avg:.4f} time={dt:.1f}s"
+		if logger is not None:
+			logger(msg)
+		else:
+			print(msg)
+		if return_best and m_loss.avg < best_loss:
+			best_loss = m_loss.avg
+			best_state = {k: v.cpu() for k, v in net.state_dict().items()}
 	net.eval()
-	return net
+	if return_best and best_state is not None:
+		return net, best_state, best_loss
+	return net, None, None
 
 
 def main():
 	ap = argparse.ArgumentParser()
 	ap.add_argument("--data", type=str, default="data/sp.npz")
-	ap.add_argument("--epochs", type=int, default=5)
+	ap.add_argument("--epochs", type=int, default=100)
 	ap.add_argument("--batch-size", type=int, default=256)
 	ap.add_argument("--lr", type=float, default=1e-3)
 	ap.add_argument("--weight-decay", type=float, default=1e-4)
@@ -122,6 +134,8 @@ def main():
 	ap.add_argument("--clip-norm", type=float, default=1.0)
 	ap.add_argument("--seed", type=int, default=42, help="随机种子 (默认42)")
 	ap.add_argument("--no-amp", action="store_true", help="禁用自动混合精度")
+	ap.add_argument("--model", type=str, default=None, help="可选：预训练/上一轮 best 权重；若提供将在其基础上继续训练")
+	ap.add_argument("--log", type=str, default=None, help="可选：将每个 epoch 指标追加写入该日志文件")
 	args = ap.parse_args()
 
 	if args.device.startswith("cuda") and not torch.cuda.is_available():
@@ -133,9 +147,28 @@ def main():
 	data = np.load(args.data)
 	ds = build_dataset(data["s"], data["p"], data["z"])
 	net = PolicyValueNet()
-	net = train_model(
-		net,
-		ds,
+	if args.model is not None:
+		if not os.path.isfile(args.model):
+			raise FileNotFoundError(f"--model file not found: {args.model}")
+		state = torch.load(args.model, map_location=args.device)
+		net.load_state_dict(state)
+		print(f"Loaded pretrained weights from {args.model}")
+
+	log_f = None
+	if args.log is not None:
+		os.makedirs(os.path.dirname(args.log), exist_ok=True)
+		mode = "a" if os.path.exists(args.log) else "w"
+		log_f = open(args.log, mode, encoding="utf-8")
+		if mode == "w":
+			log_f.write("epoch,loss,policy,value,time\n")
+	def logger(msg: str):
+		print(msg)
+		if log_f:
+			log_f.write(msg+"\n"); log_f.flush()
+
+	net, best_state, best_loss = train_model(
+		net=net,
+		dataset=ds,
 		device=args.device,
 		epochs=args.epochs,
 		batch_size=args.batch_size,
@@ -144,9 +177,18 @@ def main():
 		clip_norm=args.clip_norm,
 		amp=not args.no_amp,
 		seed=args.seed,
+		logger=logger,
+		return_best=True,
 	)
+	os.makedirs(os.path.dirname(args.save), exist_ok=True)
 	torch.save(net.state_dict(), args.save)
-	print(f"saved {args.save}")
+	logger(f"saved final {args.save}")
+	if best_state is not None:
+		best_path = args.save.replace('.pt', '_best.pt')
+		torch.save(best_state, best_path)
+		logger(f"saved best(by loss {best_loss:.4f}) -> {best_path}")
+	if log_f:
+		log_f.close()
 
 
 if __name__ == "__main__":

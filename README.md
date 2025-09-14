@@ -26,14 +26,22 @@ Core learning triple: (s, π, z).
 2. Network (PolicyValueNet): light residual CNN → 96 policy logits + scalar value v ∈ [−1,1].
 3. MCTS: PUCT selection Q+U; root Dirichlet noise for exploration; illegal actions masked then renormalised; value signs flipped up the path.
 4. Self-Play: run N simulations per move, convert visit counts to π; use temperature sampling for early moves then argmax; game end produces z.
-5. Training (train.py / learn.py): minimise L = CE(policy_logits, π_target) + MSE(v, z); AdamW + optional AMP; iterative mode adds replay buffer + arena gating (accept if new model win rate ≥ threshold).
-6. Stability: strict legality masking, temperature cooling, replay buffer balancing distribution shift.
+5. Training (train.py): minimise L = CE(policy_logits, π_target) + MSE(v, z); AdamW + optional AMP. Iteration is performed manually: generate new self-play data → train → arena test.
+6. Stability: strict legality masking, temperature cooling; (optional) you can maintain a simple replay buffer externally by concatenating past NPZ files before training to reduce distribution shift.
 
-Technical notes:
-- PUCT: U ∝ P[a] * sqrt(N_total) / (1 + N[a]) balancing exploration–exploitation.
-- Dirichlet: root prior perturbation avoids early policy collapse.
-- Value sign flip: zero-sum perspective alignment.
-- AMP: reduces memory + latency; falls back cleanly on CPU or when disabled.
+Technical notes / principles:
+- PUCT: U ∝ P[a] * sqrt(N_total) / (1 + N[a]) ensuring principled exploration–exploitation tradeoff.
+- Dirichlet root noise: prevents premature policy collapse; can be disabled for deterministic evaluation / arena.
+- Value sign inversion: propagates evaluation from leaf to root with alternating perspective (zero-sum consistency).
+- Manual iteration + gating: user-driven loop (self-play → train → arena) promotes a candidate only if its arena win rate ≥ threshold, preventing regressions without requiring an orchestration script.
+- Loss structure: policy cross-entropy + value MSE; clean separation enables later auxiliary heads (e.g. tower ownership) without entangling core optimisation.
+- Determinism hooks: unified `--seed` seeds Python / NumPy / Torch; helps reproduce acceptance decisions and debugging runs.
+- Mixed precision (AMP): halves memory & speeds math on GPU; automatic fallback keeps CPU path simple.
+- Gradient safety: norm clipping + scaler help prevent exploding updates and NaN cascades.
+- Illegal action masking: logits for invalid moves removed then renormalised; guarantees π is a valid distribution and stabilises training.
+- Data schema: NPZ (`s,p,z`) is minimal yet extensible (extra arrays can be appended without breaking existing loaders).
+- Evaluation independence: arena uses deterministic argmax (no temperature / noise) to measure pure policy quality separate from exploration heuristics.
+- Extensibility: modular files (rules, search, model, data gen, training, loop) allow swapping individual components (e.g. alternative network or search tweaks) without global refactors.
 
 ## Files
 
@@ -44,48 +52,57 @@ src/
   model.py       # Policy-value network
   self_play.py   # Self-play generation (s, π, z)
   train.py       # Supervised training on NPZ data
-  learn.py       # Iterative loop: self-play → train → arena → gating
   config.py      # Constants / default hyperparams
 tests/           # Rule & smoke tests
 data/            # Generated data & snapshots
 ckpt/            # Model weights
 ```
 
-### Quick
-Generate self-play data:
+### Quick Start
+Minimal 3-step improvement loop. Commands are single-line; add or adjust flags (e.g. `--model`, `--mcts-sims`, temperature) as you iterate.
+
+1. Self-play (produce `data/sp.npz` with `(s, π, z)`):
 ```bash
-python -m src.self_play --games 50 --mcts-sims 200 --out data/sp.npz --temperature 1.0 --temp-moves 8
+python -m src.self_play --games 100 --mcts-sims 200 --out data/sp.npz --seed 42
 ```
-Supervised training (single dataset):
+Generates trajectories using MCTS (PUCT) per move; visit counts -> policy target; final outcome -> value targets.
+
+2. Train (fit policy & value heads):
 ```bash
-python -m src.train --data data/sp.npz --epochs 5 --batch-size 256 --lr 1e-3 --seed 123
+python -m src.train --data data/sp.npz --epochs 1000 --batch-size 256 --lr 1e-3 --weight-decay 1e-4 --clip-norm 1.0 --save ckpt/cand.pt --log ckpt/train.log --seed 42
 ```
-Iterative self-improvement:
+Produces `cand.pt` (last) and `cand_best.pt` (lowest loss). Use `--model ckpt/best.pt` to continue from previous best, or tweak AMP / device flags if needed.
+
+3. Arena (gating candidate vs best):
 ```bash
-python -m src.learn --iters 5 --games-per-iter 80 --mcts-sims-sp 200 \
-  --eval-games 40 --accept-rate 0.55 --temperature 1.0 --temp-moves 8
+python -m src.arena --candidate ckpt/cand_best.pt --best ckpt/best.pt --eval-games 50 --mcts-sims 400 --accept-rate 0.55
 ```
-Disable AMP: add `--no-amp`. Use CPU: `--device cpu`.
+Deterministic matches (no temperature / noise). Promote candidate if win rate meets threshold. Then loop back to step 1 with the new `best.pt`.
+
+Optional: plot training curve for a sanity check.
+```bash
+python ckpt/visual.py --log ckpt/train.log --smooth 7 --out curve.png
+```
+Log format: `epoch N: loss=... policy=... value=... time=...s`.
+
+### Human vs AI (battle)
+Play against the current model:
+```bash
+python tests/battle.py --model ckpt/best.pt --mcts-sims 400 --device cuda
+```
+Controls:
+- Mouse: click a cell (highlight)
+- Keys: `s` square, `c` circle, `a` arrow (press `a` repeatedly to rotate direction 0→1→2→3)
+- Preview: green outline / arrow before confirming
+- Enter / Space: place; `q` / `Esc`: quit
+
+Notes: `--mcts-sims` sets AI strength; without `--model` you play a random-initialized net (weak). Lower sims (e.g. 100) for speed; add `--delay` (if present) to slow display.
 
 ### Data Format
 NPZ file fields:
 - `s`: float32 (N, C, 4, 4)
 - `p`: float32 (N, 96)
 - `z`: float32 (N,)
-
-## Changelog
-
-High-impact implemented changes (relative to initial baseline):
-1. Unified AMP handling: single `autocast` + `GradScaler` pattern across `train.py` and `learn.py` with `--no-amp` switch.
-2. Added reproducibility controls: `--seed` (covers Python, NumPy, Torch, CUDA determinism best-effort).
-3. Extended CLI hyperparameters: learning rate, weight decay, clip norm, temperature scheduling (`--temperature`, `--temp-moves`), Dirichlet toggle (`--no-dirichlet`).
-4. Self-play enhancements: early-move temperature sampling; optional root Dirichlet suppression; legal mask strictness clarified.
-5. Replay buffer + gating: iterative loop (`learn.py`) with arena evaluation and accept-rate threshold.
-6. Code simplification: removed interim utility module; consolidated training logic; streamlined `train_once`.
-7. Policy/Value loss structure: explicit CE + MSE with clear logging points; ready for auxiliary heads.
-8. Dataset specification: consistent NPZ schema (`s,p,z`) documented; easy future augmentation hook.
-9. Documentation overhaul: concise English README + formalised rules, engine, file map, future roadmap.
-10. Safety & stability: gradient scaling, deterministic seeds, explicit illegal action masking, temperature decay.
 
 ## Future
 

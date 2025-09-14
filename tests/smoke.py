@@ -1,4 +1,3 @@
-import torch
 from src.game import GameState
 from src.model import PolicyValueNet
 from src.mcts import MCTS

@@ -1,9 +1,8 @@
 from __future__ import annotations
-import cv2
-import os
+import cv2, os
 import numpy as np
-from typing import List, Tuple
-from .config import BOARD_SIZE, NUM_CELLS, DIRS
+from typing import Tuple
+from .config import BOARD_SIZE, DIRS
 
 def rc_to_i(r: int, c: int) -> int:
 	return r * BOARD_SIZE + c
