@@ -6,21 +6,32 @@ from .model import PolicyValueNet
 from .mcts import MCTS
 from .game import GameState
 
+from .utils import print_board
+from datetime import datetime
+
 @torch.no_grad()
 def run_arena(new_net: PolicyValueNet, old_net: PolicyValueNet, games: int, sims: int, device: str, debug: bool=False) -> float:
 	wins = 0
 	for g in trange(games, desc="arena"):
+		if debug:
+			cur_time = datetime.now().strftime('%Y%m%d.%H%M%S')
+			print_board(None, cur_time, 0)
+			actions = []
 		st = GameState()
 		# Alternate first mover: even -> new_net as player0; odd -> old_net as player0
 		new_is_p0 = (g % 2 == 0)
 		order = (new_net, old_net) if new_is_p0 else (old_net, new_net)
 		steps = 0
 		while not st.game_over():
+			steps += 1
 			cur = order[st.player]
 			pi, _ = MCTS(cur, device=device, add_root_noise=False).run(st, sims=sims)
 			a = int(pi.argmax())
 			st.apply(a)
-			steps += 1
+			if debug:
+				cur_step = GameState.decode_action(a)
+				actions.append([cur_step, st.player])
+				print_board(actions, cur_time, steps)
 		z = st.result()  # +1 if absolute player0 wins, -1 otherwise
 		new_win = (z == 1) if new_is_p0 else (z == -1)
 		wins += 1 if new_win else 0

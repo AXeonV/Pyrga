@@ -182,15 +182,19 @@ class GameState:
 
 	def result(self) -> int:
 		# count towers (cells with 3 pieces) majority by owner_counts
-		p0, p1 = 0, 0
+		achived = [0, 0, 0, 0]
 		for r in range(BOARD_SIZE):
 			for c in range(BOARD_SIZE):
-				if self.board_types[r, c].sum() == 3:
-					if self.owner_counts[r, c, 0] > self.owner_counts[r, c, 1]:
-						p0 += 1
-					elif self.owner_counts[r, c, 1] > self.owner_counts[r, c, 0]:
-						p1 += 1
-		return 1 if p0 > p1 else -1
+				type = self.board_types[r, c].sum()
+				res = self.owner_counts[r, c, 0] > self.owner_counts[r, c, 1]
+				achived[type] += 1 if res else -1
+		if achived[3] != 0:
+			return 1 if achived[3] > 0 else -1
+		if achived[2] != 0:
+			return 1 if achived[2] > 0 else -1
+		if achived[1] != 0:
+			return 1 if achived[1] > 0 else -1
+		return -1	# player 1 wins by default if all tied
 
 	def obs(self) -> np.ndarray:
 		# observation planes [C,H,W]

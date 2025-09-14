@@ -18,6 +18,60 @@ Lightweight AlphaZero-style pipeline for a custom 4×4 stacking / tower control 
   - 16–31: place circle on cell i
   - 32–95: place arrow on cell i; direction = (a−32) % 4 (0 up, 1 right, 2 down, 3 left)
 
+## Result
+1st training run (batch size 256, lr 1e-3, 1000 epochs, on random init weights):
+![1st-train](res/1st-train.png)
+2nd training run (batch size 256, lr 1e-3, 1000 epochs, preload tr01_best.pt):
+![2nd-train](res/2nd-train.png)
+3rd training run (batch size 512, lr 1e-3, 1000 epochs, preload tr02_best.pt):
+![3rd-train](res/3rd-train.png)
+
+## Quick
+Pipeline: 3-step training loop. Commands are single-line; add or adjust flags (e.g. `--model`, `--mcts-sims`, temperature) as you iterate.
+
+1. Self-play (produce `data/sp.npz` with `(s, π, z)`):
+```bash
+python -m src.self_play --games 100 --mcts-sims 200 --out data/sp.npz --seed 42
+```
+Generates trajectories using MCTS (PUCT) per move; visit counts -> policy target; final outcome -> value targets.
+
+2. Train (fit policy & value heads):
+```bash
+python -m src.train --data data/sp.npz --epochs 1000 --batch-size 512 --save ckpt/tr.pt --log ckpt/tr.log --seed 42
+```
+Produces `cand.pt` (last) and `cand_best.pt` (lowest loss). Use `--model ckpt/best.pt` to continue from previous best, or tweak AMP / device flags if needed.
+
+3. Arena (gating candidate vs best):
+```bash
+python -m src.arena --candidate ckpt/tr.pt --best ckpt/best.pt --eval-games 50 --mcts-sims 400 --accept-rate 0.55
+```
+Deterministic matches (no temperature / noise). Promote candidate if win rate meets threshold. Then loop back to step 1 with the new `best.pt`.
+
+Optional: plot training curve for a sanity check.
+```bash
+python ckpt/visual.py --log ckpt/train.log --smooth 7 --out curve.png
+```
+Log format: `epoch N: loss=... policy=... value=... time=...s`.
+
+### Battle (vs AI)
+Play against the current model:
+```bash
+python -m tests.battle --model ckpt/best.pt --mcts-sims 400 --device cuda
+```
+Controls:
+- Mouse: click a cell (highlight)
+- Keys: `s` square, `c` circle, `a` arrow (press `a` repeatedly to rotate direction 0→1→2→3)
+- Preview: green outline / arrow before confirming
+- Enter / Space: place; `q` / `Esc`: quit
+
+Notes: `--mcts-sims` sets AI strength; without `--model` you play a random-initialized net (weak). Lower sims (e.g. 100) for speed; add `--delay` (if present) to slow display.
+
+### Data Format
+NPZ file fields:
+- `s`: float32 (N, C, 4, 4)
+- `p`: float32 (N, 96)
+- `z`: float32 (N,)
+
 ## Engine
 
 Core learning triple: (s, π, z).
@@ -42,67 +96,6 @@ Technical notes / principles:
 - Data schema: NPZ (`s,p,z`) is minimal yet extensible (extra arrays can be appended without breaking existing loaders).
 - Evaluation independence: arena uses deterministic argmax (no temperature / noise) to measure pure policy quality separate from exploration heuristics.
 - Extensibility: modular files (rules, search, model, data gen, training, loop) allow swapping individual components (e.g. alternative network or search tweaks) without global refactors.
-
-## Files
-
-```
-src/
-  game.py        # Rules & state transitions
-  mcts.py        # PUCT search
-  model.py       # Policy-value network
-  self_play.py   # Self-play generation (s, π, z)
-  train.py       # Supervised training on NPZ data
-  config.py      # Constants / default hyperparams
-tests/           # Rule & smoke tests
-data/            # Generated data & snapshots
-ckpt/            # Model weights
-```
-
-### Quick Start
-Minimal 3-step improvement loop. Commands are single-line; add or adjust flags (e.g. `--model`, `--mcts-sims`, temperature) as you iterate.
-
-1. Self-play (produce `data/sp.npz` with `(s, π, z)`):
-```bash
-python -m src.self_play --games 100 --mcts-sims 200 --out data/sp.npz --seed 42
-```
-Generates trajectories using MCTS (PUCT) per move; visit counts -> policy target; final outcome -> value targets.
-
-2. Train (fit policy & value heads):
-```bash
-python -m src.train --data data/sp.npz --epochs 1000 --batch-size 256 --lr 1e-3 --weight-decay 1e-4 --clip-norm 1.0 --save ckpt/cand.pt --log ckpt/train.log --seed 42
-```
-Produces `cand.pt` (last) and `cand_best.pt` (lowest loss). Use `--model ckpt/best.pt` to continue from previous best, or tweak AMP / device flags if needed.
-
-3. Arena (gating candidate vs best):
-```bash
-python -m src.arena --candidate ckpt/cand_best.pt --best ckpt/best.pt --eval-games 50 --mcts-sims 400 --accept-rate 0.55
-```
-Deterministic matches (no temperature / noise). Promote candidate if win rate meets threshold. Then loop back to step 1 with the new `best.pt`.
-
-Optional: plot training curve for a sanity check.
-```bash
-python ckpt/visual.py --log ckpt/train.log --smooth 7 --out curve.png
-```
-Log format: `epoch N: loss=... policy=... value=... time=...s`.
-
-### Human vs AI (battle)
-Play against the current model:
-```bash
-python tests/battle.py --model ckpt/best.pt --mcts-sims 400 --device cuda
-```
-Controls:
-- Mouse: click a cell (highlight)
-- Keys: `s` square, `c` circle, `a` arrow (press `a` repeatedly to rotate direction 0→1→2→3)
-- Preview: green outline / arrow before confirming
-- Enter / Space: place; `q` / `Esc`: quit
-
-Notes: `--mcts-sims` sets AI strength; without `--model` you play a random-initialized net (weak). Lower sims (e.g. 100) for speed; add `--delay` (if present) to slow display.
-
-### Data Format
-NPZ file fields:
-- `s`: float32 (N, C, 4, 4)
-- `p`: float32 (N, 96)
-- `z`: float32 (N,)
 
 ## Future
 
